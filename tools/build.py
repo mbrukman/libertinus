@@ -1,13 +1,92 @@
 import argparse
 import datetime
-import ufo2ft
+import logging
 import ufoLib2
 
-from fontTools import subset
-from io import StringIO
+from io import StringIO, BytesIO
 from pcpp.preprocessor import Preprocessor
+
+from ufo2ft.util import deepCopyContours
+from ufo2ft.outlineCompiler import OutlineOTFCompiler
+
+from fontTools import subset
+from fontTools.ttLib import TTFont
+from fontTools.feaLib.builder import addOpenTypeFeaturesFromString
+from fontTools.misc.transform import Transform
+from fontTools.misc.psCharStrings import T2CharString
+from fontTools.pens.basePen import BasePen
+
 from sfdLib.parser import SFDParser
 from sfdLib.utils import GLYPHCLASS_KEY, MATH_KEY
+
+from psautohint import hint_bez_glyph
+from psautohint.otfFont import convertBezToT2
+
+from pathops import Path
+
+
+logging.basicConfig(level=logging.FATAL)
+
+
+class HintPen(BasePen):
+    def __init__(self, width, name, info, glyphSet):
+        super().__init__(glyphSet)
+        self._width = width
+        self._info = info
+        self._bez = [f"% {name}", "sc"]
+        self._done = False
+
+    def _point(self, point):
+        return " ".join("%d" % round(pt) for pt in point)
+
+    def _moveTo(self, pt):
+        self._bez.append(f"{self._point(pt)} mt")
+
+    def _lineTo(self, pt):
+        self._bez.append(f"{self._point(pt)} dt")
+
+    def _curveToOne(self, pt1, pt2, pt3):
+        self._bez.append(f"{self._point(pt1 + pt2 + pt3)} ct")
+
+    def _closePath(self):
+        self._bez.append("cp")
+
+    def _endPath(self):
+        self._bez.append("ed")
+        self._done = True
+
+    def getCharString(self, private, globalSubrs):
+        if not self._done:
+            self._endPath()
+        hinted = hint_bez_glyph(self._info, "\n".join(self._bez))
+        program = convertBezToT2(hinted)
+        if self._width is not None:
+            program.insert(0, self._width)
+        charString = T2CharString(program=program, private=private, globalSubrs=globalSubrs)
+        return charString
+
+
+class OutlineCompiler(OutlineOTFCompiler):
+    def getCharStringForGlyph(self, glyph, private, globalSubrs=None):
+        if glyph.components:
+            deepCopyContours(self.allGlyphs, glyph, glyph, Transform())
+            glyph.clearComponents()
+
+        path = Path()
+        glyph.draw(path.getPen())
+        if len(glyph):
+            path.simplify(fix_winding=True, keep_starting_points=True)
+
+        defaultWidth = private.defaultWidthX
+        nominalWidth = private.nominalWidthX
+        width = glyph.width == defaultWidth and None or glyph.width - nominalWidth
+
+        info = "" # XXX
+        pen = HintPen(width, glyph.name, info, self.allGlyphs)
+        path.draw(pen)
+        charString = pen.getCharString(private, globalSubrs)
+
+        return charString
 
 
 class Font:
@@ -246,20 +325,26 @@ class Font:
             otf["MATH"].table = table
 
     def _prune(self, otf):
+        stream = BytesIO()
+        otf.save(stream)
+        stream.seek(0)
+        otf = TTFont(stream)
         options = subset.Options()
         options.set(layout_features='*', name_IDs='*', notdef_outline=True,
             recalc_average_width=True, recalc_bounds=True)
         subsetter = subset.Subsetter(options=options)
         subsetter.populate(unicodes=otf['cmap'].getBestCmap().keys())
         subsetter.subset(otf)
+        return otf
 
     def generate(self, output):
         self._update_metadata()
         self._make_over_under_line()
-        otf = ufo2ft.compileOTF(self._font, optimizeCFF=0, removeOverlaps=True,
-            overlapsBackend="pathops", featureWriters=[])
+        compiler = OutlineCompiler(self._font)
+        otf = compiler.compile()
+        addOpenTypeFeaturesFromString(otf, self._font.features.text)
         self._post_process(otf)
-        self._prune(otf)
+        otf = self._prune(otf)
         otf.save(output)
 
 

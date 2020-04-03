@@ -52,7 +52,7 @@ check: $(CHK)
 
 nofea=$(strip $(foreach f,Initials Keyboard Mono,$(findstring $f,$1)))
 
-$(BUILDDIR)/%.otl.otf: $(SOURCEDIR)/%.sfd $(GSUB) $(BUILD)
+$(BUILDDIR)/%.hint.otf: $(SOURCEDIR)/%.sfd $(GSUB) $(BUILD)
 	@echo "      BUILD  $(*F)"
 	@mkdir -p $(BUILDDIR)
 	@$(PY) $(BUILD)                                                        \
@@ -61,11 +61,6 @@ $(BUILDDIR)/%.otl.otf: $(SOURCEDIR)/%.sfd $(GSUB) $(BUILD)
 		--version=$(VERSION)                                           \
 		$(if $(call nofea,$@),,--feature-file=$(GSUB))                 \
 		;
-
-$(BUILDDIR)/%.hint.otf: $(BUILDDIR)/%.otl.otf
-	@echo "       HINT  $(*F)"
-	@rm -rf $@.log
-	@psautohint $< -o $@ --log $@.log
 
 $(BUILDDIR)/%.subr.otf: $(BUILDDIR)/%.hint.otf
 	@echo "       SUBR  $(*F)"
